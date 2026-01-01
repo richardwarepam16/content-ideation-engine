@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+anthropic
+langgraph
+langchain
+langchain-anthropic
+langchain-openai
+pydantic
+pydantic-settings
+python-dotenv
+websockets
+httpx
+aiohttp
+python-multipart
