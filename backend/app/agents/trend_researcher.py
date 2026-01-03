@@ -66,21 +66,15 @@ Return your analysis as a JSON array with this structure:
                 f"Identified {len(trends)} trending topics"
             )
 
-            # state = self.add_a2a_message( 
-            #     state, 
-            #     trends[0]["topic"], 
-            #     {"count": len(trends)}, 
-            #     to_agent="Audience Analyst", 
-            #     message_type="handoff" 
-            #     )
-
             state = self.add_a2a_message(
                 state,
-                f"Discovered {len(trends)} trends for analysis",
+                message=f"Handoff: {len(trends)} trends identified for audience analysis.",
                 data={
                     "trend_count": len(trends),
-                    "top_trend": trends[0]["topic"] if trends else None
-                }
+                    "top_trend": trends[0]["topic"] if trends else "N/A",
+                },
+                to_agent="Audience Analyst",
+                message_type="handoff",
             )
 
         except Exception as e:

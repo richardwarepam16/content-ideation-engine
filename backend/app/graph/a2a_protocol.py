@@ -1,80 +1,46 @@
-# backend/app/graph/a2a_protocol.py
-import os
-from typing import TypedDict, List, Optional, Literal, Dict
+import json
+from typing import Dict, Any, Literal
 from datetime import datetime, UTC
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-# ---------------------------------------------------------------------------
-# 🌐 Shared CORS origins assigned to all agents
-# ---------------------------------------------------------------------------
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
-
-
-# ---------------------------------------------------------------------------
-# 🪪 Agent Card — metadata for each agent (Google-style)
-# ---------------------------------------------------------------------------
-class AgentCard(TypedDict):
-    name: str
-    role: str
-    description: str
-    cors_origins: List[str]
-    capabilities: List[str]
-    version: str
-
-
-# ---------------------------------------------------------------------------
-# ✉️ A2A Message Envelope — structured agent-to-agent communication
-# ---------------------------------------------------------------------------
-class A2AMessage(TypedDict, total=False):
-    envelope_id: str
-    from_agent: str
-    to_agent: Optional[str]
-    message_type: Literal["info", "handoff", "debug", "error"]
-    summary: str
-    payload: Dict
-    timestamp: str
-
-
-# ---------------------------------------------------------------------------
-# 🏗️ Factory: Create an Agent Card
-# ---------------------------------------------------------------------------
-def create_agent_card(
-    name: str,
-    role: str,
-    description: str,
-    capabilities: List[str],
-    version: str = "1.0.0"
-) -> AgentCard:
-    return AgentCard(
-        name=name,
-        role=role,
-        description=description,
-        cors_origins=CORS_ORIGINS,
-        capabilities=capabilities,
-        version=version
-    )
-
-
-# ---------------------------------------------------------------------------
-# 📨 Factory: Create an A2A message envelope
-# ---------------------------------------------------------------------------
 def create_a2a_message(
     from_agent: str,
     summary: str,
     *,
-    to_agent: Optional[str] = None,
-    payload: Optional[dict] = None,
+    to_agent: str | None = None,
+    payload: Dict[str, Any] | None = None,
     message_type: Literal["info", "handoff", "debug", "error"] = "info",
-) -> A2AMessage:
-    return A2AMessage(
-        envelope_id=f"env-{int(datetime.utcnow().timestamp() * 1000)}",
-        from_agent=from_agent,
-        to_agent=to_agent,
-        message_type=message_type,
-        summary=summary,
-        payload=payload or {},
-        timestamp=datetime.now(UTC).isoformat()
-    )
+) -> Dict[str, Any]:
+    """
+    Creates a structured agent-to-agent (A2A) message envelope
+    that is compatible with LangChain message standards.
+
+    This adheres to a Google-style communication protocol while ensuring
+    it can be processed by LangGraph. The original message is serialized
+    as a JSON string and placed in the 'content' field.
+
+    Args:
+        from_agent: The name of the agent sending the message.
+        summary: A brief, human-readable summary of the message content.
+        to_agent: The intended recipient agent's name. If None, the
+                  message is considered a broadcast.
+        payload: A dictionary containing the message's data.
+        message_type: The type of message, which can be one of "info",
+                      "handoff", "debug", or "error".
+
+    Returns:
+        A dictionary representing the LangChain-compatible A2A message.
+    """
+    message_content = {
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+        "type": message_type,
+        "summary": summary,
+        "payload": payload or {},
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+    return {
+        "role": "function",
+        "name": from_agent,
+        "content": json.dumps(message_content)
+    }
