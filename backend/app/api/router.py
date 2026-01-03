@@ -93,19 +93,55 @@ async def websocket_ideate(websocket: WebSocket):
     
     try:
         while True:
-            # Receive request
             data = await websocket.receive_json()
             
-            # Send status updates during processing
-            await manager.send_message({
-                "type": "status",
-                "message": "Starting ideation pipeline..."
-            }, websocket)
+            # Use the IdeationRequest model for validation and structure
+            try:
+                request = IdeationRequest(**data)
+            except Exception as e:
+                await manager.send_message({"type": "error", "payload": f"Invalid request format: {e}"}, websocket)
+                continue
+
+            await manager.send_message({"type": "status", "payload": "Starting ideation pipeline..."}, websocket)
             
-            # Run workflow with streaming updates
-            # (Implementation would stream agent logs in real-time)
-            
+            initial_state = {
+                "industry": request.industry,
+                "target_audience": request.target_audience,
+                "content_types": request.content_types,
+                "additional_context": request.additional_context or "",
+                "messages": [], "execution_logs": [], "trends": [],
+                "audience_insights": [], "content_ideas": [], "current_agent": "", "error": ""
+            }
+
+            try:
+                # Use astream_events to get detailed events
+                async for event in workflow.graph.astream(initial_state, stream_mode="values"):
+                    # The event contains the full state of the graph after each step
+                    current_agent = event.get("current_agent")
+                    if current_agent:
+                        await manager.send_message({
+                            "type": "agent_update",
+                            "payload": {"agent_name": current_agent, "message": f"Agent {current_agent} is running."}
+                        }, websocket)
+
+                # After the stream is finished, the final state is in 'event'
+                final_state = event
+                await manager.send_message({
+                    "type": "final_result",
+                    "payload": {
+                        "ideas": final_state.get("content_ideas", [])
+                    }
+                }, websocket)
+
+            except Exception as e:
+                logger.error(f"Workflow execution failed: {e}")
+                await manager.send_message({"type": "error", "payload": str(e)}, websocket)
+
     except WebSocketDisconnect:
+        logger.info("WebSocket disconnected.")
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in WebSocket: {e}")
         manager.disconnect(websocket)
 
 @router.get("/api/health")
