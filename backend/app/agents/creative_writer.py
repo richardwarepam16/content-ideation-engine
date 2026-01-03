@@ -70,8 +70,10 @@ Generate 2-3 ideas per format type.
             
             state = self.add_a2a_message(
                 state,
-                f"Content ideation complete: {len(ideas)} ideas generated",
-                data={"total_ideas": len(ideas), "formats": content_types}
+                message=f"Ideation complete. Generated {len(ideas)} content ideas.",
+                data={"total_ideas": len(ideas), "formats": content_types},
+                to_agent=None,  # Broadcast to the system/end-user
+                message_type="info",
             )
             
         except Exception as e:

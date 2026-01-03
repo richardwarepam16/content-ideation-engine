@@ -71,8 +71,10 @@ Return as JSON array:
 
             state = self.add_a2a_message(
                 state,
-                f"Adapted trends for {len(state['personas'])} audience personas",
-                data={"insights_count": len(insights)}
+                message=f"Handoff: {len(insights)} audience insights ready for creative development.",
+                data={"insights_count": len(insights)},
+                to_agent="Creative Writer",
+                message_type="handoff",
             )
 
         except Exception as e:
