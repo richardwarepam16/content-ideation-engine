@@ -1,0 +1,3 @@
+Okay, I've added the `import queue` statement at the top of `streamlit/app.py` to fix the `NameError`.
+
+Please run your Streamlit app again and let me know if it's working as expected!
