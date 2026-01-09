@@ -1,8 +1,9 @@
 import streamlit as st
-import requests  
+import websocket
 import json
-import time 
-
+import threading
+import time
+import queue # Import the queue module
 from datetime import datetime
 
 # --- Page Configuration ---
@@ -14,9 +15,10 @@ st.set_page_config(
 )
 
 # --- Backend API Configuration ---
-BACKEND_URL = "http://localhost:8000/api/ideate" 
+WS_BACKEND_URL = "ws://localhost:8000/ws/ideate"
 
 # --- Helper Functions and Mappings ---
+# Corrected AGENT_NAMES_MAP maps short name to display name
 AGENT_NAMES_MAP = {
     "researcher": "Trend Researcher",
     "analyst": "Audience Analyst",
@@ -38,25 +40,25 @@ CONTENT_FORMAT_ICONS = {
 # --- Session State Initialization ---
 if 'is_processing' not in st.session_state:
     st.session_state.is_processing = False
-if 'agent_states' not in st.session_state: 
+if 'active_agent' not in st.session_state:
+    st.session_state.active_agent = None
+if 'agent_states' not in st.session_state:
     st.session_state.agent_states = {
         "researcher": "pending", "analyst": "pending", "writer": "pending"
     }
-if 'ideation_result_full' not in st.session_state: 
-    st.session_state.ideation_result_full = None
-if 'backend_error' not in st.session_state: 
-    st.session_state.backend_error = None
-
-# New state variables for controlled visual playback
-if 'playback_active' not in st.session_state:
-    st.session_state.playback_active = False
-if 'glow_up_agents' not in st.session_state:
-    st.session_state.glow_up_agents = ["researcher", "analyst", "writer"] # Hardcoded sequence
-if 'glow_up_index' not in st.session_state:
-    st.session_state.glow_up_index = 0
-
+if 'ideation_result' not in st.session_state:
+    st.session_state.ideation_result = None
+if 'websocket_error' not in st.session_state:
+    st.session_state.websocket_error = None
+if 'stop_websocket_thread_event' not in st.session_state:
+    st.session_state.stop_websocket_thread_event = threading.Event()
+if 'messages_queue' not in st.session_state:
+    st.session_state.messages_queue = queue.Queue()
+if 'websocket_thread' not in st.session_state:
+    st.session_state.websocket_thread = None
 
 def get_agent_state_color(state):
+    # Returns text color for markdown
     colors = {
         "pending": "grey",
         "running": "blue",
@@ -65,32 +67,32 @@ def get_agent_state_color(state):
     }
     return colors.get(state, "grey")
 
-def send_ideation_request(industry, target_audience, content_types, additional_context=""):
-    payload = {
-        "industry": industry,
-        "target_audience": target_audience,
-        "content_types": content_types,
-        "additional_context": additional_context
-    }
-    headers = {"Content-Type": "application/json"}
-    
+def listen_to_websocket(payload, messages_queue: queue.Queue, stop_event: threading.Event):
     try:
-        response = requests.post(BACKEND_URL, headers=headers, data=json.dumps(payload))
-        response.raise_for_status()  
-        return response.json()
-    except requests.exceptions.ConnectionError:
-        st.error(f"Could not connect to the backend server. Please ensure the backend is running at {BACKEND_URL}")
-        return None
-    except requests.exceptions.HTTPError as e:
-        st.error(f"HTTP error occurred: {e}. Response: {e.response.text}")
-        return None
+        ws = websocket.create_connection(WS_BACKEND_URL)
+        messages_queue.put({"type": "status", "content": "WebSocket connected."})
+        ws.send(json.dumps(payload))
+
+        while not stop_event.is_set():
+            message = ws.recv()
+            data = json.loads(message)
+            messages_queue.put(data) # Put all messages into the queue
+
+    except websocket._exceptions.WebSocketConnectionClosedException:
+        if not stop_event.is_set():
+            messages_queue.put({"type": "error", "payload": "WebSocket connection closed unexpectedly."})
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        return None
+        messages_queue.put({"type": "error", "payload": f"WebSocket error: {e}"})
+    finally:
+        if 'ws' in locals() and ws.connected:
+            ws.close()
+        stop_event.set() # Ensure stop event is set on thread exit
+        messages_queue.put({"type": "status", "content": "WebSocket thread stopped."})
+
 
 # --- Streamlit UI ---
 st.title("✨ Content Ideation Engine")
-st.markdown("---")
+
 
 st.sidebar.header("Configuration")
 
@@ -112,6 +114,7 @@ with st.sidebar.form("ideation_form"):
     if video_checked: content_types.append("video")
     if social_checked: content_types.append("social")
 
+    # Store form values in session state to persist
     st.session_state.industry = industry
     st.session_state.target_audience = target_audience
     st.session_state.blog_checked = blog_checked
@@ -124,102 +127,127 @@ with st.sidebar.form("ideation_form"):
         if not industry or not target_audience or not content_types:
             st.warning("Please fill in all required fields and select at least one content type.")
         else:
+            # Reset states for a new run
             st.session_state.is_processing = True
-            st.session_state.agent_states = { # Reset all to pending initially
+            st.session_state.active_agent = None
+            st.session_state.agent_states = {
                 "researcher": "pending", "analyst": "pending", "writer": "pending"
             }
-            st.session_state.ideation_result_full = None
-            st.session_state.backend_error = None 
-            st.session_state.playback_active = False # Deactivate any ongoing playback
-            st.session_state.glow_up_index = 0 # Reset playback index
+            st.session_state.ideation_result = None
+            st.session_state.websocket_error = None
+            st.session_state.stop_websocket_thread_event.clear() # Clear event for new thread
+            st.session_state.messages_queue = queue.Queue() # Clear queue for new run
+
+            payload = {
+                "industry": industry,
+                "target_audience": target_audience,
+                "content_types": content_types,
+                "additional_context": ""
+            }
             
-            st.rerun() # Show pending state and spinner before backend call
+            # Start WebSocket listener in a separate thread
+            st.session_state.websocket_thread = threading.Thread(
+                target=listen_to_websocket, 
+                args=(payload, st.session_state.messages_queue, st.session_state.stop_websocket_thread_event,)
+            )
+            st.session_state.websocket_thread.start()
+            st.rerun() # Force rerun to show spinner and initial states
 
-            # --- Blocking Backend Call ---
-            with st.spinner("Generating ideas... Please wait for the backend to complete the workflow."):
-                full_response = send_ideation_request(industry, target_audience, content_types)
-                if full_response:
-                    st.session_state['ideation_result_full'] = full_response
-                    if full_response.get("error"):
-                        st.session_state.backend_error = full_response["error"]
-                else:
-                    st.session_state.backend_error = "Failed to get response from backend."
-            
-            st.session_state.is_processing = False # Backend call finished
-
-            # --- Trigger visual-only sequential glow-up after backend response ---
-            if not st.session_state.backend_error:
-                st.session_state.playback_active = True # Activate playback
-                st.rerun() # Trigger the first step of the visual animation
-            else: # If there was a backend error
-                 for agent_key in st.session_state.agent_states:
-                    if st.session_state.agent_states[agent_key] == "pending":
-                        st.session_state.agent_states[agent_key] = "error"
-                 st.rerun() # Show error state in sidebar
-
-
-# --- Agent Flow Display (in sidebar) ---
-st.sidebar.markdown("---")
-st.sidebar.header("Agent Execution Flow")
-
-for agent_short_name, agent_display_name in AGENT_NAMES_MAP.items():
-    current_state = st.session_state.agent_states.get(agent_short_name, "pending")
-    st.sidebar.markdown(
-        f"##### {AGENT_ICONS.get(agent_short_name, 'ℹ️')} {agent_display_name}"
-    )
-    if current_state == "completed":
-        st.sidebar.success(f"✓ {current_state.capitalize()}")
-    elif current_state == "running":
-        st.sidebar.info(f"▶️ {current_state.capitalize()}...")
-    elif current_state == "error":
-        st.sidebar.error(f"❌ {current_state.capitalize()}!")
-    else:
-        st.sidebar.empty() 
-
-
-# --- Controlled Playback Logic across reruns (Top-level, after all UI elements) ---
-# This block manages the visual sequential glow-up animation
-if st.session_state.get('playback_active', False) and not st.session_state.is_processing:
-    # Ensure all agents are marked completed at the very end
-    if st.session_state.glow_up_index >= len(st.session_state.glow_up_agents):
-        for agent_key in st.session_state.agent_states:
-            if st.session_state.agent_states[agent_key] == "running":
-                st.session_state.agent_states[agent_key] = "completed"
-        st.session_state.playback_active = False # Animation finished
-        st.rerun() # Final rerun to show all completed status
+# --- Process messages from the queue in the main thread ---
+if st.session_state.is_processing:
+    # Process one message from the queue per rerun to show updates more granularly
+    if not st.session_state.messages_queue.empty():
+        message = st.session_state.messages_queue.get()
         
-    elif st.session_state.glow_up_index < len(st.session_state.glow_up_agents):
-        current_agent_key = st.session_state.glow_up_agents[st.session_state.glow_up_index]
+        if message["type"] == "agent_update":
+            agent_short_name = message["payload"]["agent_name"] # This should be "researcher", "analyst", etc.
+            if agent_short_name:
+                # Mark previous active agent as completed, and current as running
+                for agent_key in st.session_state.agent_states:
+                    if st.session_state.agent_states[agent_key] == "running":
+                        st.session_state.agent_states[agent_key] = "completed"
+                st.session_state.agent_states[agent_short_name] = "running"
+                st.session_state.active_agent = agent_short_name # Update active agent
+        elif message["type"] == "final_result":
+            st.session_state.ideation_result = message["payload"]
+            st.session_state.is_processing = False
+            st.session_state.active_agent = None
+            for agent_key in st.session_state.agent_states:
+                if st.session_state.agent_states[agent_key] == "running":
+                    st.session_state.agent_states[agent_key] = "completed"
+            st.session_state.stop_websocket_thread_event.set()
+        elif message["type"] == "error":
+            st.session_state.websocket_error = message["payload"]
+            st.session_state.is_processing = False
+            st.session_state.active_agent = None
+            for agent_key in st.session_state.agent_states:
+                if st.session_state.agent_states[agent_key] == "running":
+                    st.session_state.agent_states[agent_key] = "error"
+            st.session_state.stop_websocket_thread_event.set()
         
-        # Mark all previous running agents as completed
-        for key in st.session_state.agent_states:
-            if st.session_state.agent_states[key] == "running" and key != current_agent_key:
-                st.session_state.agent_states[key] = "completed"
+        st.rerun() # Rerun immediately after processing a message
 
-        st.session_state.agent_states[current_agent_key] = "running"
-        st.rerun() # Show agent running
-        time.sleep(0.8) # Artificial delay for visual effect
-        
-        st.session_state.agent_states[current_agent_key] = "completed"
-        st.session_state.glow_up_index += 1 # Move to next agent
-        st.rerun() # Show agent completed and trigger next step
+    # Check if the thread has finished (e.g., due to an internal error or completion)
+    if st.session_state.websocket_thread and not st.session_state.websocket_thread.is_alive():
+        if st.session_state.is_processing: # Only if still marked as processing
+            st.session_state.is_processing = False 
+            st.session_state.websocket_error = st.session_state.get('websocket_error') or "Processing stopped unexpectedly."
+            st.rerun()
 
 
 st.markdown("---")
 
 # --- Main Content Area ---
-st.header("Generated Content Ideas") 
+st.header("Agent Execution Flow")
 
-if st.session_state.backend_error:
-    st.error(f"Error: {st.session_state.backend_error}")
-elif st.session_state.ideation_result_full and not st.session_state.playback_active: # Display content AFTER playback is inactive
-    result = st.session_state.ideation_result_full
+# Display current agent status
+cols = st.columns(len(AGENT_NAMES_MAP))
+for i, (agent_short_name, agent_display_name) in enumerate(AGENT_NAMES_MAP.items()):
+    current_state = st.session_state.agent_states.get(agent_short_name, "pending")
+    with cols[i]:
+        st.markdown(
+            f"##### {AGENT_ICONS.get(agent_short_name, 'ℹ️')} {agent_display_name}", 
+            help=f"Status: {current_state.capitalize()}"
+        )
+        # Use st.progress for visual indication
+        progress_value = 0
+        if current_state == "running":
+            progress_value = 50
+        elif current_state == "completed":
+            progress_value = 100
+        st.progress(progress_value, text=current_state.capitalize())
+
+if st.session_state.is_processing:
+    # Display active agent name using the mapping
+    active_agent_display_name = AGENT_NAMES_MAP.get(st.session_state.active_agent, 'Starting...')
+    st.info(f"Currently processing: **{active_agent_display_name}**")
+    # Add a stop button to terminate processing
+    if st.button("Stop Processing"):
+        st.session_state.stop_websocket_thread_event.set()
+        st.session_state.is_processing = False
+        st.session_state.active_agent = None
+        st.session_state.websocket_error = "Processing stopped by user."
+        if st.session_state.websocket_thread and st.session_state.websocket_thread.is_alive():
+             st.session_state.websocket_thread.join(timeout=1) # Wait for thread to finish
+        st.rerun()
+
+st.markdown("---")
+st.header("Generated Content Ideas")
+
+if st.session_state.websocket_error:
+    st.error(f"Error: {st.session_state.websocket_error}")
+elif st.session_state.ideation_result:
+    result = st.session_state.ideation_result
+    
+    # Display Error if any
+    if result.get("error"):
+        st.error(f"Error during ideation: {result['error']}")
     
     # Display Content Ideas
-    if result.get("ideas"): 
+    if result.get("ideas"):
         
         cols = st.columns(2)
-        for i, idea in enumerate(result["ideas"]): 
+        for i, idea in enumerate(result["ideas"]):
             with cols[i % 2]:
                 with st.expander(f"{CONTENT_FORMAT_ICONS.get(idea.get('format', 'blog'), '📝')} {idea.get('title', 'No Title')}", expanded=True):
                     st.markdown(f"**Format:** {idea.get('format', 'N/A').capitalize()}")
@@ -231,6 +259,17 @@ elif st.session_state.ideation_result_full and not st.session_state.playback_act
                     if idea.get('trending'):
                         st.info("🔥 Trending Topic")
         
+    # Display Agent Logs (if available in the final result)
+    if result.get("agent_logs"):
+        st.subheader("Full Agent Execution Log (from final result)")
+        for log_entry in result["agent_logs"]:
+            # Corrected: AGENT_NAMES_MAP maps short_name to display_name
+            agent_short_name_from_log = log_entry['agent_name'] # This should be the short name e.g., "researcher"
+            agent_display_name_from_log = AGENT_NAMES_MAP.get(agent_short_name_from_log, agent_short_name_from_log)
+            
+            timestamp = datetime.fromtimestamp(log_entry['timestamp']).strftime('%H:%M:%S')
+            st.markdown(f"**{timestamp} - {AGENT_ICONS.get(agent_short_name_from_log, 'ℹ️')} {agent_display_name_from_log}:** {log_entry['content']}")
+
     # Display Metadata
     if result.get("metadata"):
         st.subheader("Workflow Metadata")
@@ -242,8 +281,7 @@ elif st.session_state.ideation_result_full and not st.session_state.playback_act
         with metadata_col3:
             st.metric("A2A Messages", result["metadata"].get("a2a_messages", 0))
 else:
-    if not st.session_state.is_processing and not st.session_state.playback_active:
-        st.info("Submit your configuration in the sidebar to generate content ideas!")
+    st.info("Submit your configuration in the sidebar to generate content ideas!")
 
 st.markdown("---")
 
