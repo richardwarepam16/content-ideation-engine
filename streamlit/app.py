@@ -12,7 +12,9 @@ st.set_page_config(
 )
 
 # --- WebSocket Configuration ---
-WEBSOCKET_URL = "ws://localhost:8000/ws/ideate"
+import os
+
+WEBSOCKET_URL = os.getenv("WEBSOCKET_URL", "ws://localhost:8000/ws/ideate")
 
 # --- Agent Information ---
 agent_names = {
