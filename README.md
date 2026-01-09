@@ -4,9 +4,12 @@ The Content Ideation Engine is a powerful, multi-agent system designed to genera
 
 ## Live Demo
 
-You can try out the live application here: [Content Ideation Engine Demo](https://content-ideation-engine-v2.onrender.com/)
+You can chcek out the application here:
 
-## Features
+
+
+https://github.com/user-attachments/assets/743d7422-b09b-4768-9e09-4a5ce99421d6
+
 
 *   **Multi-Agent System:** Utilizes a collaborative team of AI agents for comprehensive content ideation.
 *   **Audience Analysis:** An Audience Analyst agent identifies and analyzes the target audience for the given topic.
